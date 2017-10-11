@@ -33,26 +33,52 @@ Modules:
     models/hdpmodel
     models/logentropy_model
     models/normmodel
+    models/translation_matrix
     models/lsi_dispatcher
     models/lsi_worker
     models/lda_dispatcher
     models/lda_worker
+    models/atmodel
     models/word2vec
+    models/keyedvectors
     models/doc2vec
+    models/fasttext
     models/phrases
+    models/coherencemodel
+    models/basemodel
+    models/callbacks
     models/wrappers/ldamallet
     models/wrappers/dtmmodel
     models/wrappers/ldavowpalwabbit.rst
+    models/wrappers/wordrank
+    models/wrappers/varembed
+    models/wrappers/fasttext
     similarities/docsim
     similarities/index
+    sklearn_api/atmodel
+    sklearn_api/d2vmodel
+    sklearn_api/hdp
+    sklearn_api/ldamodel
+    sklearn_api/ldaseqmodel
+    sklearn_api/lsimodel
+    sklearn_api/phrases
+    sklearn_api/rpmodel
+    sklearn_api/text2bow
+    sklearn_api/tfidf
+    sklearn_api/w2vmodel
     topic_coherence/aggregation
     topic_coherence/direct_confirmation_measure
     topic_coherence/indirect_confirmation_measure
     topic_coherence/probability_estimation
     topic_coherence/segmentation
+    topic_coherence/text_analysis
     scripts/glove2word2vec
     scripts/make_wikicorpus
-    scripts/word2vec_standalone 
+    scripts/word2vec_standalone
+    scripts/make_wiki_online
+    scripts/make_wiki_online_lemma
+    scripts/make_wiki_online_nodebug
+    scripts/word2vec2tensor
     parsing/porter
     parsing/preprocessing
     summarization/bm25
@@ -63,6 +89,3 @@ Modules:
     summarization/summariser
     summarization/syntactic_unit
     summarization/textcleaner
-
-
-

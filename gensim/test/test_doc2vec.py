@@ -22,24 +22,30 @@ from testfixtures import log_capture
 
 import numpy as np
 
-from gensim import utils, matutils
-from gensim.models import doc2vec
+from gensim import utils
+from gensim.models import doc2vec, keyedvectors
 
 module_path = os.path.dirname(__file__)  # needed because sample data files are located in the same folder
 datapath = lambda fname: os.path.join(module_path, 'test_data', fname)
 
 
 class DocsLeeCorpus(object):
-    def __init__(self, string_tags=False):
+    def __init__(self, string_tags=False, unicode_tags=False):
         self.string_tags = string_tags
+        self.unicode_tags = unicode_tags
 
     def _tag(self, i):
-        return i if not self.string_tags else '_*%d' % i
+        if self.unicode_tags:
+            return u'_\xa1_%d' % i
+        elif self.string_tags:
+            return '_*%d' % i
+        return i
 
     def __iter__(self):
         with open(datapath('lee_background.cor')) as f:
             for i, line in enumerate(f):
                 yield doc2vec.TaggedDocument(utils.simple_preprocess(line), [self._tag(i)])
+
 
 list_corpus = list(DocsLeeCorpus())
 
@@ -63,12 +69,47 @@ def testfile():
     return os.path.join(tempfile.gettempdir(), 'gensim_doc2vec.tst')
 
 
+def load_on_instance():
+    # Save and load a Doc2Vec Model on instance for test
+    model = doc2vec.Doc2Vec(DocsLeeCorpus(), min_count=1)
+    model.save(testfile())
+    model = doc2vec.Doc2Vec()  # should fail at this point
+    return model.load(testfile())
+
+
 class TestDoc2VecModel(unittest.TestCase):
     def test_persistence(self):
         """Test storing/loading the entire model."""
         model = doc2vec.Doc2Vec(DocsLeeCorpus(), min_count=1)
         model.save(testfile())
         self.models_equal(model, doc2vec.Doc2Vec.load(testfile()))
+
+    def testPersistenceWord2VecFormat(self):
+        """Test storing the entire model in word2vec format."""
+        model = doc2vec.Doc2Vec(DocsLeeCorpus(), min_count=1)
+        # test saving both document and word embedding
+        test_doc_word = os.path.join(tempfile.gettempdir(), 'gensim_doc2vec.dw')
+        model.save_word2vec_format(test_doc_word, doctag_vec=True, word_vec=True, binary=True)
+        binary_model_dv = keyedvectors.KeyedVectors.load_word2vec_format(test_doc_word, binary=True)
+        self.assertEqual(len(model.wv.vocab) + len(model.docvecs), len(binary_model_dv.vocab))
+        # test saving document embedding only
+        test_doc = os.path.join(tempfile.gettempdir(), 'gensim_doc2vec.d')
+        model.save_word2vec_format(test_doc, doctag_vec=True, word_vec=False, binary=True)
+        binary_model_dv = keyedvectors.KeyedVectors.load_word2vec_format(test_doc, binary=True)
+        self.assertEqual(len(model.docvecs), len(binary_model_dv.vocab))
+        # test saving word embedding only
+        test_word = os.path.join(tempfile.gettempdir(), 'gensim_doc2vec.w')
+        model.save_word2vec_format(test_word, doctag_vec=False, word_vec=True, binary=True)
+        binary_model_dv = keyedvectors.KeyedVectors.load_word2vec_format(test_word, binary=True)
+        self.assertEqual(len(model.wv.vocab), len(binary_model_dv.vocab))
+
+    def test_unicode_in_doctag(self):
+        """Test storing document vectors of a model with unicode titles."""
+        model = doc2vec.Doc2Vec(DocsLeeCorpus(unicode_tags=True), min_count=1)
+        try:
+            model.save_word2vec_format(testfile(), doctag_vec=True, word_vec=True, binary=True)
+        except UnicodeEncodeError:
+            self.fail('Failed storing unicode title.')
 
     def test_load_mmap(self):
         """Test storing/loading the entire model."""
@@ -89,6 +130,7 @@ class TestDoc2VecModel(unittest.TestCase):
         model.build_vocab(corpus)
         self.assertEqual(len(model.docvecs.doctag_syn0), 300)
         self.assertEqual(model.docvecs[0].shape, (100,))
+        self.assertEqual(model.docvecs[np.int64(0)].shape, (100,))
         self.assertRaises(KeyError, model.__getitem__, '_*0')
 
     def test_missing_string_doctag(self):
@@ -136,10 +178,10 @@ class TestDoc2VecModel(unittest.TestCase):
         model.build_vocab(corpus)
         self.assertTrue(model.docvecs.similarity_unseen_docs(model, rome_str, rome_str) > model.docvecs.similarity_unseen_docs(model, rome_str, car_str))
 
-    def model_sanity(self, model):
+    def model_sanity(self, model, keep_training=True):
         """Any non-trivial model on DocsLeeCorpus can pass these sanity checks"""
         fire1 = 0  # doc 0 sydney fires
-        fire2 = 8  # doc 8 sydney fires
+        fire2 = np.int64(8)  # doc 8 sydney fires
         tennis1 = 6  # doc 6 tennis
 
         # inferred vector should be top10 close to bulk-trained one
@@ -173,13 +215,19 @@ class TestDoc2VecModel(unittest.TestCase):
         # fire docs should be closer than fire-tennis
         self.assertTrue(model.docvecs.similarity(fire1, fire2) > model.docvecs.similarity(fire1, tennis1))
 
+        # keep training after save
+        if keep_training:
+            model.save(testfile())
+            loaded = doc2vec.Doc2Vec.load(testfile())
+            loaded.train(sentences, total_examples=loaded.corpus_count, epochs=loaded.iter)
+
     def test_training(self):
         """Test doc2vec training."""
         corpus = DocsLeeCorpus()
         model = doc2vec.Doc2Vec(size=100, min_count=2, iter=20, workers=1)
         model.build_vocab(corpus)
         self.assertEqual(model.docvecs.doctag_syn0.shape, (300, 100))
-        model.train(corpus)
+        model.train(corpus, total_examples=model.corpus_count, epochs=model.iter)
 
         self.model_sanity(model)
 
@@ -194,20 +242,26 @@ class TestDoc2VecModel(unittest.TestCase):
 
     def test_dmm_hs(self):
         """Test DM/mean doc2vec training."""
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=1, negative=0,
-                                alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_mean=1, size=24, window=4,
+            hs=1, negative=0, alpha=0.05, min_count=2, iter=20
+        )
         self.model_sanity(model)
 
     def test_dms_hs(self):
         """Test DM/sum doc2vec training."""
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_mean=0, size=24, window=4, hs=1, negative=0,
-                                alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_mean=0, size=24, window=4, hs=1,
+            negative=0, alpha=0.05, min_count=2, iter=20
+        )
         self.model_sanity(model)
 
     def test_dmc_hs(self):
         """Test DM/concatenate doc2vec training."""
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_concat=1, size=24, window=4, hs=1, negative=0,
-                                alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_concat=1, size=24, window=4,
+            hs=1, negative=0, alpha=0.05, min_count=2, iter=20
+        )
         self.model_sanity(model)
 
     def test_dbow_neg(self):
@@ -217,20 +271,26 @@ class TestDoc2VecModel(unittest.TestCase):
 
     def test_dmm_neg(self):
         """Test DM/mean doc2vec training."""
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=0, negative=10,
-                                alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=0,
+            negative=10, alpha=0.05, min_count=2, iter=20
+        )
         self.model_sanity(model)
 
     def test_dms_neg(self):
         """Test DM/sum doc2vec training."""
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_mean=0, size=24, window=4, hs=0, negative=10,
-                                alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_mean=0, size=24, window=4, hs=0,
+            negative=10, alpha=0.05, min_count=2, iter=20
+        )
         self.model_sanity(model)
 
     def test_dmc_neg(self):
         """Test DM/concatenate doc2vec training."""
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_concat=1, size=24, window=4, hs=0, negative=10,
-                                alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_concat=1, size=24, window=4, hs=0,
+            negative=10, alpha=0.05, min_count=2, iter=20
+        )
         self.model_sanity(model)
 
     def test_parallel(self):
@@ -261,10 +321,14 @@ class TestDoc2VecModel(unittest.TestCase):
     def test_deterministic_dmc(self):
         """Test doc2vec results identical with identical RNG seed."""
         # bigger, dmc
-        model = doc2vec.Doc2Vec(DocsLeeCorpus(), dm=1, dm_concat=1, size=24, window=4, hs=1, negative=3,
-                                seed=42, workers=1)
-        model2 = doc2vec.Doc2Vec(DocsLeeCorpus(), dm=1, dm_concat=1, size=24, window=4, hs=1, negative=3,
-                                 seed=42, workers=1)
+        model = doc2vec.Doc2Vec(
+            DocsLeeCorpus(), dm=1, dm_concat=1, size=24,
+            window=4, hs=1, negative=3, seed=42, workers=1
+        )
+        model2 = doc2vec.Doc2Vec(
+            DocsLeeCorpus(), dm=1, dm_concat=1, size=24,
+            window=4, hs=1, negative=3, seed=42, workers=1
+        )
         self.models_equal(model, model2)
 
     def test_mixed_tag_types(self):
@@ -273,11 +337,11 @@ class TestDoc2VecModel(unittest.TestCase):
         model = doc2vec.Doc2Vec()
         model.build_vocab(mixed_tag_corpus)
         expected_length = len(sentences) + len(model.docvecs.doctags)  # 9 sentences, 7 unique first tokens
-        self.assertEquals(len(model.docvecs.doctag_syn0), expected_length)
+        self.assertEqual(len(model.docvecs.doctag_syn0), expected_length)
 
     def models_equal(self, model, model2):
         # check words/hidden-weights
-        self.assertEqual(len(model.vocab), len(model2.vocab))
+        self.assertEqual(len(model.wv.vocab), len(model2.wv.vocab))
         self.assertTrue(np.allclose(model.wv.syn0, model2.wv.syn0))
         if model.hs:
             self.assertTrue(np.allclose(model.syn1, model2.syn1))
@@ -300,20 +364,26 @@ class TestDoc2VecModel(unittest.TestCase):
                 self.assertTrue(hasattr(model, 'syn0_lockf'))
                 model.delete_temporary_training_data(keep_doctags_vectors=False, keep_inference=False)
                 self.assertTrue(len(model['human']), 10)
-                self.assertTrue(model.vocab['graph'].count, 5)
+                self.assertTrue(model.wv.vocab['graph'].count, 5)
                 self.assertTrue(not hasattr(model, 'syn1'))
                 self.assertTrue(not hasattr(model, 'syn1neg'))
                 self.assertTrue(not hasattr(model, 'syn0_lockf'))
                 self.assertTrue(model.docvecs and not hasattr(model.docvecs, 'doctag_syn0'))
                 self.assertTrue(model.docvecs and not hasattr(model.docvecs, 'doctag_syn0_lockf'))
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=1, negative=0, alpha=0.05, min_count=2, iter=20)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=1,
+            negative=0, alpha=0.05, min_count=2, iter=20
+        )
         model.delete_temporary_training_data(keep_doctags_vectors=True, keep_inference=True)
         self.assertTrue(model.docvecs and hasattr(model.docvecs, 'doctag_syn0'))
         self.assertTrue(hasattr(model, 'syn1'))
-        self.model_sanity(model)
-        model = doc2vec.Doc2Vec(list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=0, negative=1, alpha=0.05, min_count=2, iter=20)
+        self.model_sanity(model, keep_training=False)
+        model = doc2vec.Doc2Vec(
+            list_corpus, dm=1, dm_mean=1, size=24, window=4, hs=0,
+            negative=1, alpha=0.05, min_count=2, iter=20
+        )
         model.delete_temporary_training_data(keep_doctags_vectors=True, keep_inference=True)
-        self.model_sanity(model)
+        self.model_sanity(model, keep_training=False)
         self.assertTrue(hasattr(model, 'syn1neg'))
 
     @log_capture()
@@ -335,14 +405,18 @@ class TestDoc2VecModel(unittest.TestCase):
         model = doc2vec.Doc2Vec(alpha=0.025, min_alpha=0.025, min_count=1, workers=8, size=5)
         model.build_vocab(sentences)
         for epoch in range(10):
-            model.train(sentences)
+            model.train(sentences, total_examples=model.corpus_count, epochs=model.iter)
             model.alpha -= 0.002
             model.min_alpha = model.alpha
             if epoch == 5:
                 model.alpha += 0.05
         warning = "Effective 'alpha' higher than previous training cycles"
         self.assertTrue(warning in str(l))
-#endclass TestDoc2VecModel
+
+    def testLoadOnClassError(self):
+        """Test if exception is raised when loading doc2vec model on instance"""
+        self.assertRaises(AttributeError, load_on_instance)
+# endclass TestDoc2VecModel
 
 
 if not hasattr(TestDoc2VecModel, 'assertLess'):
@@ -361,6 +435,7 @@ class ConcatenatedDoc2Vec(object):
     Models must have exactly-matching vocabulary and document IDs. (Models should
     be trained separately; this wrapper just returns concatenated results.)
     """
+
     def __init__(self, models):
         self.models = models
         if hasattr(models[0], 'docvecs'):
@@ -372,7 +447,7 @@ class ConcatenatedDoc2Vec(object):
     def infer_vector(self, document, alpha=0.1, min_alpha=0.0001, steps=5):
         return np.concatenate([model.infer_vector(document, alpha, min_alpha, steps) for model in self.models])
 
-    def train(self, ignored):
+    def train(self, *ignore_args, **ignore_kwargs):
         pass  # train subcomponents individually
 
 
@@ -396,11 +471,13 @@ def read_su_sentiment_rotten_tomatoes(dirname, lowercase=True):
     http://nlp.stanford.edu/~socherr/stanfordSentimentTreebank.zip
     has been expanded. It's not too big, so compose entirely into memory.
     """
-    logging.info("loading corpus from %s" % dirname)
+    logging.info("loading corpus from %s", dirname)
 
     # many mangled chars in sentences (datasetSentences.txt)
-    chars_sst_mangled = ['à', 'á', 'â', 'ã', 'æ', 'ç', 'è', 'é', 'í',
-                         'í', 'ï', 'ñ', 'ó', 'ô', 'ö', 'û', 'ü']
+    chars_sst_mangled = [
+        'à', 'á', 'â', 'ã', 'æ', 'ç', 'è', 'é', 'í',
+        'í', 'ï', 'ñ', 'ó', 'ô', 'ö', 'û', 'ü'
+    ]
     sentence_fixups = [(char.encode('utf-8').decode('latin1'), char) for char in chars_sst_mangled]
     # more junk, and the replace necessary for sentence-phrase consistency
     sentence_fixups.extend([
@@ -462,8 +539,10 @@ def read_su_sentiment_rotten_tomatoes(dirname, lowercase=True):
     assert len([phrase for phrase in phrases if phrase.split == 'test']) == 2210  # 'test'
     assert len([phrase for phrase in phrases if phrase.split == 'dev']) == 1100  # 'dev'
 
-    logging.info("loaded corpus with %i sentences and %i phrases from %s",
-                 len(info_by_sentence), len(phrases), dirname)
+    logging.info(
+        "loaded corpus with %i sentences and %i phrases from %s",
+        len(info_by_sentence), len(phrases), dirname
+    )
 
     return phrases
 
